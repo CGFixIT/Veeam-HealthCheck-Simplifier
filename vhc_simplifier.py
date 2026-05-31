@@ -1,0 +1,564 @@
+#!/usr/bin/env python3
+"""
+Veeam Health Check Simplifier - v4.1 (demo-ready)
+
+CSV (default) or JSON input. Graceful when files are missing.
+--demo mode uses embedded sample data from real VHC exports.
+
+Requires Python 3.12+  (tested on 3.12 and 3.13)
+
+python vhc_simplifier.py --demo
+python vhc_simplifier.py --demo --sf-account-id 001...   # credential error expected without creds
+"""
+
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import logging
+import os
+import pathlib
+import re
+import sys
+import hashlib
+import urllib.request
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+import pandas as pd
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger("vhc_simplifier")
+
+try:
+    from simple_salesforce import Salesforce
+    HAS_SF = True
+except ImportError:
+    HAS_SF = False
+
+try:
+    import httpx
+    HAS_HTTPX = True
+except ImportError:
+    HAS_HTTPX = False
+
+
+# ------------------------------------
+# Embedded demo data
+# ------------------------------------
+
+EMBEDDED_JOBS = """Name,RetentionCount,RetainDaysToKeep,StgEncryptionEnabled
+"VMware - Windows/Linux/Solaris",7,30,False
+"Hyper-V - Windows / Linux",14,14,True
+"""
+
+EMBEDDED_REPOS = """Name,IsImmutabilitySupported
+"Pure //x",False
+"Exagrid",True
+"""
+
+EMBEDDED_SECURITY = """Best Practice,Status
+"Remote desktop protocol is disabled","Not Implemented"
+"MFA is enabled","Not Implemented"
+"Backup jobs to cloud repositories is encrypted","Passed"
+"""
+
+EMBEDDED_MALWARE = """ObjectName,Status,DetectionTime
+"YARA","Infected","2025-04-28 16:37:01"
+"PortScan","Infected","2025-04-28 16:36:43"
+"MALWARE","Suspicious","2025-05-21 17:19:49"
+"""
+
+EMBEDDED_SESSIONS = """JobName,Status
+"VMware - Windows/Linux/Solaris",Failed
+"""
+
+
+@dataclass(frozen=True)
+class HealthCheckConfig:
+    recommended_retention_days: int = 30
+    recommended_min_retention_count: int = 7
+
+
+CONFIG = HealthCheckConfig()
+
+EXPECTED_BASENAMES: dict[str, str] = {
+    "jobs": "localhost_Jobs",
+    "sessions": "VeeamSessionReport",
+    "security": "localhost_SecurityCompliance",
+    "repositories": "localhost_Repositories",
+    "malware": "localhostmalware_events",
+}
+
+_PS_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _ps_quote(s: str) -> str | None:
+    if not isinstance(s, str):
+        s = str(s)
+    if _PS_CONTROL_CHARS.search(s):
+        return None
+    return "'" + s.replace("'", "''") + "'"
+
+
+def _find_unquoted_hash(cmd: str) -> int | None:
+    i, n = 0, len(cmd)
+    in_quote = False
+    while i < n:
+        ch = cmd[i]
+        if ch == "'":
+            if in_quote and i + 1 < n and cmd[i + 1] == "'":
+                i += 2
+                continue
+            in_quote = not in_quote
+        elif ch == "#" and not in_quote:
+            return i
+        i += 1
+    return None
+
+
+@dataclass
+class HealthCheckResult:
+    findings: list[str] = field(default_factory=list)
+    enriched: list[dict[str, Any]] = field(default_factory=list)
+    artifacts: dict[str, pathlib.Path] = field(default_factory=dict)
+    missing_files: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    sections: dict[str, list[str]] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "findings": self.findings,
+            "enriched": self.enriched,
+            "artifacts": {k: str(v) for k, v in self.artifacts.items()},
+            "missing_files": self.missing_files,
+            "errors": self.errors,
+            "sections": self.sections,
+        }
+
+
+def _safe_load_csv(path: pathlib.Path, result: HealthCheckResult) -> pd.DataFrame | None:
+    if not path.exists():
+        result.missing_files.append(path.name)
+        return None
+    try:
+        if path.stat().st_size == 0:
+            result.errors.append(f"{path.name}: empty")
+            return None
+        return pd.read_csv(path)
+    except Exception as e:
+        result.errors.append(f"{path.name}: {type(e).__name__}: {e}")
+        return None
+
+
+def _safe_load_json(path: pathlib.Path, result: HealthCheckResult) -> pd.DataFrame | None:
+    if not path.exists():
+        result.missing_files.append(path.name)
+        return None
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            df = pd.DataFrame(data)
+        elif isinstance(data, dict):
+            df = pd.DataFrame(data.get("data", [data]))
+        else:
+            result.errors.append(f"{path.name}: bad JSON structure")
+            return None
+        return df if not df.empty else None
+    except Exception as e:
+        result.errors.append(f"{path.name}: {type(e).__name__}: {e}")
+        return None
+
+
+def _load_embedded() -> dict[str, pd.DataFrame | None]:
+    return {
+        "jobs": pd.read_csv(io.StringIO(EMBEDDED_JOBS)),
+        "sessions": pd.read_csv(io.StringIO(EMBEDDED_SESSIONS)),
+        "security": pd.read_csv(io.StringIO(EMBEDDED_SECURITY)),
+        "repositories": pd.read_csv(io.StringIO(EMBEDDED_REPOS)),
+        "malware": pd.read_csv(io.StringIO(EMBEDDED_MALWARE)),
+    }
+
+
+def analyze_jobs(jobs_df, sessions_df, result):
+    findings: list[str] = []
+    if jobs_df is not None:
+        for _, row in jobs_df.iterrows():
+            name = row.get("Name", "<unknown>")
+            if row.get("RetentionCount", 0) < CONFIG.recommended_min_retention_count:
+                findings.append(f"Job '{name}' has low retention count.")
+            if row.get("RetainDaysToKeep", 0) < CONFIG.recommended_retention_days:
+                findings.append(f"Job '{name}' keeps restore points < recommended.")
+            if not row.get("StgEncryptionEnabled", False):
+                findings.append(f"Job '{name}' missing storage encryption.")
+    if sessions_df is not None:
+        try:
+            failed = sessions_df[sessions_df["Status"].astype(str).str.lower() == "failed"]
+            for job in failed["JobName"].dropna().unique():
+                findings.append(f"Recent job session failure: '{job}'.")
+        except Exception:
+            pass
+    return findings
+
+
+def analyze_security(sec_df, result):
+    findings: list[str] = []
+    if sec_df is None:
+        return findings
+    for _, row in sec_df.iterrows():
+        bp = row.get("Best Practice", "")
+        status = row.get("Status", "")
+        if pd.isna(bp) or str(bp).strip() == "":
+            continue
+        if status not in ("Passed", "Unable to detect"):
+            findings.append(f"Security Best Practice NOT implemented: {bp} ({status})")
+    return findings
+
+
+def analyze_repositories(repo_df, result):
+    findings: list[str] = []
+    if repo_df is None:
+        return findings
+    for _, row in repo_df.iterrows():
+        name = row.get("Name", "<unknown>")
+        if not row.get("IsImmutabilitySupported", False):
+            findings.append(f"Repository '{name}' does not support immutability.")
+    return findings
+
+
+def analyze_malware(malware_df, result):
+    findings: list[str] = []
+    if malware_df is None:
+        return findings
+    if "Status" not in malware_df.columns:
+        return findings
+    mask = malware_df["Status"].astype(str).str.lower().str.contains(
+        r"infected|suspicious", na=False, regex=True
+    )
+    for _, row in malware_df[mask].iterrows():
+        findings.append(
+            f"Malware event: {row.get('ObjectName', '<unknown>')} - "
+            f"{row.get('Status', '<unknown>')} at {row.get('DetectionTime', '<unknown>')}"
+        )
+    return findings
+
+
+PATTERN_MAP = {
+    r"Job '(.+?)' missing storage encryption": {
+        "severity": "High", "category": "Job",
+        "explain": "Enable at-rest encryption to protect backup data.",
+        "cmd": "Set-VBRJobEncryptionOptions -Job {0} -EnableEncryption $true",
+        "kb": "https://helpcenter.veeam.com/docs/backup/vbr/encryption.html",
+    },
+    r"Job '(.+?)' has low retention count": {
+        "severity": "Medium", "category": "Job",
+        "explain": "Increase restore-point retention.",
+        "cmd": "Set-VBRJob -Job {0} -RestorePoints 30  # adjust as needed",
+        "kb": "https://helpcenter.veeam.com/docs/backup/vbr/retention_policy.html",
+    },
+    r"Job '(.+?)' keeps restore points < recommended": {
+        "severity": "Medium", "category": "Job",
+        "explain": "Extend RetainDaysToKeep.",
+        "cmd": "Set-VBRJob -Job {0}  # adjust RetainDaysToKeep via job settings",
+        "kb": "https://helpcenter.veeam.com/docs/backup/vbr/retention_policy.html",
+    },
+    r"Repository '(.+?)' does not support immutability": {
+        "severity": "High", "category": "Repository",
+        "explain": "Migrate to Hardened Linux Repository for ransomware resilience.",
+        "cmd": "# Manual: Configure Hardened Linux Repository (see VBR v11+ docs)",
+        "kb": "https://helpcenter.veeam.com/docs/backup/vbr/hardened_repository.html",
+    },
+    r"Recent job session failure: '(.+?)'": {
+        "severity": "High", "category": "Job",
+        "explain": "Investigate last sessions for root cause.",
+        "cmd": "Get-VBRJob -Name {0} | Get-VBRTaskSession | Sort-Object EndTime -Descending | Select-Object -First 5",
+        "kb": "https://www.veeam.com/kb",
+    },
+    r"Security Best Practice NOT implemented: (.+?) \(": {
+        "severity": "High", "category": "Security",
+        "explain": "Apply missing security control per Veeam Hardening Guide.",
+        "cmd": "# See Veeam Hardening Guide for implementation steps",
+        "kb": "https://bp.veeam.com/security/Design-and-implementation/Hardening/",
+    },
+    r"Malware event: (.+?) - ": {
+        "severity": "High", "category": "Malware",
+        "explain": "Triage immediately - isolate affected systems.",
+        "cmd": "Get-VBRMalwareDetectionEvent | Sort-Object DetectionTime -Descending | Select-Object -First 10",
+        "kb": "https://helpcenter.veeam.com/docs/backup/vsphere/malware_detection.html",
+    },
+}
+
+_MUTATING_VERBS = ("Set-", "Convert-", "Remove-", "New-", "Add-")
+
+
+def enrich_findings(raw: list[str]) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for line in raw:
+        matched = False
+        for pattern, meta in PATTERN_MAP.items():
+            m = re.search(pattern, line, flags=re.IGNORECASE)
+            if not m:
+                continue
+            obj = m.group(1) if m.groups() else ""
+            dedup_key = hashlib.sha256(
+                f"{meta['severity']}|{meta['category']}|{obj}".encode()
+            ).hexdigest()
+            if dedup_key in seen:
+                matched = True
+                break
+            seen.add(dedup_key)
+            cmd_template = meta["cmd"]
+            if "{0}" in cmd_template:
+                quoted = _ps_quote(obj)
+                cmd_out = (
+                    f"# REFUSED: control chars in object name: {obj!r}"
+                    if quoted is None else cmd_template.format(quoted)
+                )
+            else:
+                cmd_out = cmd_template
+            enriched.append({
+                "raw": line, "object": obj,
+                "severity": meta["severity"], "category": meta["category"],
+                "explain": meta["explain"], "kb": meta["kb"], "cmd": cmd_out,
+            })
+            matched = True
+            break
+        if not matched:
+            enriched.append({
+                "raw": line, "object": "", "severity": "Info", "category": "General",
+                "explain": "No predefined remediation - review manually.", "kb": "", "cmd": "",
+            })
+    return enriched
+
+
+def write_markdown(enriched, sections, out_path):
+    lines = [
+        "# Veeam Health Check Remediation Summary",
+        f"*Generated: {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}*", "",
+        "## Section Summary",
+    ]
+    for s, items in sections.items():
+        lines.append(f"- **{s}**: {len(items)} finding(s)")
+    lines += ["", "## Detailed Findings"]
+    for it in enriched:
+        lines += [
+            f"### {it['severity']} - {it['category']}",
+            f"**Finding:** {it['raw']}",
+            f"**Impact:** {it['explain']}",
+        ]
+        if it["cmd"]:
+            lines += ["", "```powershell", it["cmd"], "```"]
+        if it["kb"]:
+            lines.append(f"[KB / Docs]({it['kb']})")
+        lines.append("---")
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return out_path
+
+
+def write_powershell_script(enriched, out_path):
+    lines = [
+        "# Auto-generated Veeam remediation script (SAFE PREVIEW)",
+        "# WARNING: All mutating commands include -WhatIf.",
+        "# Remove -WhatIf only after validating in a non-production environment.",
+        f"# Generated: {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}",
+        "",
+    ]
+    for it in enriched:
+        cmd = it.get("cmd", "")
+        if not cmd:
+            continue
+        if cmd.lstrip().startswith(_MUTATING_VERBS) and "-WhatIf" not in cmd:
+            h = _find_unquoted_hash(cmd)
+            cmd = (f"{cmd[:h].rstrip()} -WhatIf  {cmd[h:]}" if h is not None else f"{cmd} -WhatIf")
+        lines += [f"# {it['raw'].replace(chr(13), ' ').replace(chr(10), ' ')}", cmd, ""]
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return out_path
+
+
+def write_ticket_payload(enriched, out_path):
+    payload = [
+        {
+            "short_description": e["raw"][:250],
+            "severity": e["severity"],
+            "category": e["category"],
+            "cmd": e["cmd"],
+            "kb": e["kb"],
+        }
+        for e in enriched if e["severity"] in ("High", "Medium")
+    ]
+    out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return out_path
+
+
+def _push_to_salesforce(enriched, sf_account_id, result, username=None, password=None, token=None):
+    username = username or os.getenv("SF_USERNAME")
+    password = password or os.getenv("SF_PASSWORD")
+    token = token or os.getenv("SF_TOKEN")
+    if not all([username, password, token]):
+        result.errors.append(
+            "Salesforce credentials missing. Set SF_USERNAME/SF_PASSWORD/SF_TOKEN env vars "
+            "or use --sf-username/--sf-password/--sf-token"
+        )
+        return
+    if not HAS_SF:
+        result.errors.append("pip install simple-salesforce")
+        return
+    try:
+        sf = Salesforce(username=username, password=password, security_token=token)
+        for e in enriched:
+            if e["severity"] not in ("High", "Medium"):
+                continue
+            sf.Task.create({
+                "Subject": e["raw"][:80],
+                "Description": f"{e['cmd']}\n\nKB: {e['kb']}",
+                "Priority": "High" if e["severity"] == "High" else "Normal",
+                "Status": "Not Started",
+                "WhatId": sf_account_id,
+            })
+        logger.info("Salesforce push complete")
+    except Exception as exc:
+        result.errors.append(f"Salesforce error: {exc}")
+
+
+def _post_slack_summary(enriched, webhook, result):
+    high = sum(1 for e in enriched if e.get("severity") == "High")
+    med = sum(1 for e in enriched if e.get("severity") == "Medium")
+    payload = json.dumps({"text": f"VHC complete - {high} High, {med} Medium findings."}).encode()
+    try:
+        if HAS_HTTPX:
+            httpx.post(webhook, json={"text": f"VHC: {high}H {med}M"}, timeout=10)
+        else:
+            req = urllib.request.Request(
+                webhook, data=payload, headers={"Content-Type": "application/json"}
+            )
+            urllib.request.urlopen(req, timeout=10)
+        logger.info("Slack posted")
+    except Exception as exc:
+        result.errors.append(f"Slack error: {exc}")
+
+
+def _print_console_report(result: HealthCheckResult) -> None:
+    print("\n# Veeam Health Check Summary (v4.1)\n")
+    for section, items in result.sections.items():
+        print(f"## {section}")
+        for f in items or []:
+            print(f"- {f}")
+        print()
+    if result.missing_files:
+        print("## Missing files (graceful):")
+        for f in result.missing_files:
+            print(f"- {f}")
+        print()
+    if result.errors:
+        print("## Errors / Warnings:")
+        for e in result.errors:
+            print(f"- {e}")
+        print()
+    if result.artifacts:
+        print("## Artifacts written:")
+        for k, v in result.artifacts.items():
+            print(f"- {k}: {v}")
+
+
+def run_healthcheck(
+    input_dir: str | pathlib.Path = ".",
+    output_dir: str | pathlib.Path = ".",
+    write_artifacts: bool = True,
+    verbose: bool = True,
+    input_format: str = "csv",
+    demo: bool = False,
+    sf_account_id: str | None = None,
+    slack_webhook: str | None = None,
+    sf_username: str | None = None,
+    sf_password: str | None = None,
+    sf_token: str | None = None,
+) -> dict[str, Any]:
+    input_dir = pathlib.Path(input_dir)
+    output_dir = pathlib.Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    result = HealthCheckResult()
+
+    if demo:
+        logger.info("Running in --demo mode with embedded sample data")
+        dfs = _load_embedded()
+    else:
+        loader = _safe_load_json if input_format == "json" else _safe_load_csv
+        dfs = {}
+        for key, base in EXPECTED_BASENAMES.items():
+            dfs[key] = loader(input_dir / f"{base}.{input_format}", result)
+
+    missing = [k for k, v in dfs.items() if v is None]
+    if missing and not demo:
+        msg = f"Graceful partial run - missing files: {', '.join(missing)}. Continuing with available data."
+        result.errors.append(msg)
+        logger.warning(msg)
+
+    sections = {
+        "Backup Jobs": analyze_jobs(dfs.get("jobs"), dfs.get("sessions"), result),
+        "Security & Compliance": analyze_security(dfs.get("security"), result),
+        "Repositories": analyze_repositories(dfs.get("repositories"), result),
+        "Malware Events": analyze_malware(dfs.get("malware"), result),
+    }
+    all_findings = [f for fl in sections.values() for f in fl]
+    result.findings = all_findings
+    result.sections = sections
+    result.enriched = enrich_findings(all_findings)
+
+    if write_artifacts and all_findings:
+        result.artifacts["markdown"] = write_markdown(
+            result.enriched, sections, output_dir / "remediation_summary.md"
+        )
+        result.artifacts["powershell"] = write_powershell_script(
+            result.enriched, output_dir / "fixit.ps1"
+        )
+        result.artifacts["tickets"] = write_ticket_payload(
+            result.enriched, output_dir / "tickets.json"
+        )
+
+    if sf_account_id and result.enriched:
+        _push_to_salesforce(result.enriched, sf_account_id, result, sf_username, sf_password, sf_token)
+    if slack_webhook and result.enriched:
+        _post_slack_summary(result.enriched, slack_webhook, result)
+    if verbose:
+        _print_console_report(result)
+    return result.to_dict()
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(
+        description="Veeam Health Check Simplifier v4.1 - CSV/JSON + demo + graceful degradation"
+    )
+    p.add_argument("--input-dir", default=".", help="Directory with CSV/JSON files")
+    p.add_argument("--output-dir", default=".", help="Where to write artifacts")
+    p.add_argument("--input-format", choices=["csv", "json"], default="csv")
+    p.add_argument("--demo", action="store_true", help="Use embedded sample data (no files needed)")
+    p.add_argument("--no-artifacts", action="store_true")
+    p.add_argument("--quiet", action="store_true")
+    p.add_argument("--sf-account-id", default=None)
+    p.add_argument("--sf-username", default=None)
+    p.add_argument("--sf-password", default=None)
+    p.add_argument("--sf-token", default=None)
+    p.add_argument("--slack-webhook", default=None)
+    args = p.parse_args()
+    result = run_healthcheck(
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        write_artifacts=not args.no_artifacts,
+        verbose=not args.quiet,
+        input_format=args.input_format,
+        demo=args.demo,
+        sf_account_id=args.sf_account_id,
+        slack_webhook=args.slack_webhook,
+        sf_username=args.sf_username,
+        sf_password=args.sf_password,
+        sf_token=args.sf_token,
+    )
+    return 2 if result.get("errors") else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
