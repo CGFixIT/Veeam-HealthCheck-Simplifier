@@ -33,7 +33,7 @@ Out of scope: vulnerabilities in Veeam Backup & Replication itself, or issues re
 
 Please report security issues privately via one of the following:
 
-- **Email:** [security@cgfixit.com](mailto:security@cgfixit.com)
+- **Email:** [security@cgfixit.com](mailto:contact@cgfixit.com)
 - **Web:** [https://cgfixit.com](https://cgfixit.com) (use the contact form and mark subject as `[SECURITY]`)
 
 ### What to Include
