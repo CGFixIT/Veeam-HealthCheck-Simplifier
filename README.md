@@ -12,7 +12,8 @@
 - **PS injection prevention** — object names with control characters are refused, not interpolated
 - **Salesforce integration** — creates Tasks on an Account record for High/Medium findings
 - **Slack notifications** — posts a severity summary to an incoming webhook
-- **Graceful degradation** — missing input files are logged but never fatal; partial runs proceed
+- **Graceful degradation** — missing input files are logged but never fatal; partial runs proceed; individual analyzer failures are recorded and skipped without aborting the run
+- **Robust data handling** — tolerates non-numeric, missing (`NaN`), and string cells in input data without crashing
 - **No secrets in code** — Salesforce credentials resolved from environment variables only
 
 ## Generated Artifacts
@@ -31,6 +32,7 @@
 - `pandas` (core dependency)
 - `simple-salesforce` *(optional — only for `--sf-account-id`)*
 - `httpx` *(optional — Slack fallback uses stdlib `urllib` if absent)*
+- `pytest` *(dev/testing only)*
 
 ```bash
 pip install -r requirements.txt
@@ -103,17 +105,33 @@ Input (CSV / JSON / --demo)
   _safe_load_*()       <- adapter layer (swap format here only)
         |
         v
-  analyze_*()          <- pure functions, fault-isolated per domain
+  _run_analyzer()      <- fault isolation wrapper (records errors, never aborts)
+        |
+        v
+  analyze_*()          <- pure functions, domain-scoped
         |
         v
   enrich_findings()    <- pattern-matched remediation + PS injection guard
         |
-        |---> write_markdown()
-        |---> write_powershell_script()
-        |---> write_ticket_payload()
-        |---> _push_to_salesforce()   (optional)
-        `---> _post_slack_summary()   (optional)
+        |---> _write_artifact()        <- IO error isolation wrapper
+        |         |---> write_markdown()
+        |         |---> write_powershell_script()
+        |         `---> write_ticket_payload()
+        |---> _push_to_salesforce()    (optional)
+        `---> _post_slack_summary()    (optional)
 ```
+
+---
+
+## Testing
+
+A pytest suite lives in `tests/test_vhc_simplifier.py` and covers helpers, analyzers, loaders, enrichment, artifact writers, resilience wrappers, and full integration runs (demo, CSV input, missing-file degradation).
+
+```bash
+python -m pytest tests/ -v
+```
+
+All 46 tests run without external dependencies (no Salesforce/Slack credentials needed).
 
 ---
 
