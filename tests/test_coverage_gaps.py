@@ -280,7 +280,7 @@ class TestSafeLoadJsonShapes:
         assert len(df) == 1
 
     def test_bare_dict_wrapped_in_list(self, tmp_path):
-        data = {"Name": "Repo1", "IsImmutabilitySupported": True}
+        data = {"Name":"Repo1", "IsImmutabilitySupported": True}
         (tmp_path / "test.json").write_text(json.dumps(data))
         result = vhc.HealthCheckResult()
         df = vhc._safe_load_json(tmp_path / "test.json", result)
@@ -414,7 +414,7 @@ class TestWriteMarkdown:
         enriched = vhc.enrich_findings(["Job 'X' missing storage encryption."])
         out = vhc.write_markdown(enriched, {}, tmp_path / "summary.md")
         text = out.read_text()
-        assert "helpcenter.veeam.com" in text
+        assert "https://helpcenter.veeam.com/docs/backup/vbr/encryption.html" in text
 
     def test_empty_enriched_list(self, tmp_path):
         out = vhc.write_markdown([], {}, tmp_path / "summary.md")
