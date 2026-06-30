@@ -5,6 +5,7 @@ Run with:  python -m pytest tests/ -v
 
 from __future__ import annotations
 
+import http.client
 import json
 import pathlib
 import sys
@@ -398,18 +399,14 @@ class _FakeHTTPResponse:
 def _make_redirecting_https_connection(calls, redirect_host, redirect_target):
     """Build a fake http.client.HTTPSConnection that 302s from redirect_host elsewhere."""
 
-    class _FakeHTTPSConnection:
+    class _FakeHTTPSConnection(http.client.HTTPSConnection):
+        # Subclass the real connection (rather than faking it from scratch) so urllib
+        # internals that read class-level attributes off http.client.HTTPSConnection
+        # before any instance exists (e.g. .debuglevel, ._http_vsn in HTTPSHandler.__init__)
+        # keep working across Python versions without us having to chase each one down.
         def __init__(self, host, *args, **kwargs):
             self.host = host
             self.sock = _FakeSock()
-
-        def set_debuglevel(self, *args, **kwargs):
-            pass
-
-        def set_tunnel(self, *args, **kwargs):
-            # No-op: lets this fake work unchanged whether or not urllib's
-            # ProxyHandler decides to CONNECT-tunnel (e.g. HTTPS_PROXY set in CI).
-            pass
 
         def request(self, method, url, body=None, headers=None, **kwargs):
             calls.append(self.host)
