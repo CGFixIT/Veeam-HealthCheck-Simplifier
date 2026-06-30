@@ -305,7 +305,7 @@ class TestIntegrationErrorHandling:
         assert vhc._validate_slack_webhook(
             "https://hooks.slack-gov.com/services/T00/B00/xxx"
         )
-        assert not vhc._validate_slack_webhook(
+        assert not vhc._validate_slack_webhook(  # DevSkim: ignore DS137138 — testing that HTTP is rejected
             "http://hooks.slack.com/services/T00/B00/xxx"
         )
         assert not vhc._validate_slack_webhook("https://evil.com")
