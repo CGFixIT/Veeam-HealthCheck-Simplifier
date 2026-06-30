@@ -83,10 +83,18 @@ class TestWindowsPaths:
         export_dir = tmp_path / "VHC"
         export_dir.mkdir()
         (export_dir / "VBR01_Jobs.csv").write_text(vhc.EMBEDDED_JOBS, encoding="utf-8")
-        (export_dir / "VeeamSessionReport.csv").write_text(vhc.EMBEDDED_SESSIONS, encoding="utf-8")
-        (export_dir / "VBR01_SecurityCompliance.csv").write_text(vhc.EMBEDDED_SECURITY, encoding="utf-8")
-        (export_dir / "VBR01_Repositories.csv").write_text(vhc.EMBEDDED_REPOS, encoding="utf-8")
-        (export_dir / "VBR01malware_events.csv").write_text(vhc.EMBEDDED_MALWARE, encoding="utf-8")
+        (export_dir / "VeeamSessionReport.csv").write_text(
+            vhc.EMBEDDED_SESSIONS, encoding="utf-8"
+        )
+        (export_dir / "VBR01_SecurityCompliance.csv").write_text(
+            vhc.EMBEDDED_SECURITY, encoding="utf-8"
+        )
+        (export_dir / "VBR01_Repositories.csv").write_text(
+            vhc.EMBEDDED_REPOS, encoding="utf-8"
+        )
+        (export_dir / "VBR01malware_events.csv").write_text(
+            vhc.EMBEDDED_MALWARE, encoding="utf-8"
+        )
         out = vhc.run_healthcheck(
             input_dir=str(export_dir),
             output_dir=str(tmp_path / "out"),

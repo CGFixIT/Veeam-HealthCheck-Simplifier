@@ -187,7 +187,9 @@ def _json_records(data: Any) -> Any:
     return nested if nested is not None else [data]
 
 
-def _resolve_input_file(input_dir: pathlib.Path, key: str, base: str, input_format: str) -> pathlib.Path:
+def _resolve_input_file(
+    input_dir: pathlib.Path, key: str, base: str, input_format: str
+) -> pathlib.Path:
     exact = input_dir / f"{base}.{input_format}"
     if exact.exists() or not input_dir.is_dir():
         return exact
@@ -202,16 +204,22 @@ def _resolve_input_file(input_dir: pathlib.Path, key: str, base: str, input_form
             candidates.append(path)
         elif key == "sessions" and stem.endswith("sessionreport"):
             candidates.append(path)
-        elif key == "security" and (stem == "securitycompliance" or stem.endswith("_securitycompliance")):
+        elif key == "security" and (
+            stem == "securitycompliance" or stem.endswith("_securitycompliance")
+        ):
             candidates.append(path)
-        elif key == "repositories" and (stem == "repositories" or stem.endswith("_repositories")):
+        elif key == "repositories" and (
+            stem == "repositories" or stem.endswith("_repositories")
+        ):
             candidates.append(path)
         elif key == "malware" and stem.endswith("malware_events"):
             candidates.append(path)
     return sorted(candidates, key=lambda p: p.name.lower())[0] if candidates else exact
 
 
-def _safe_load_csv(path: pathlib.Path, result: HealthCheckResult) -> pd.DataFrame | None:
+def _safe_load_csv(
+    path: pathlib.Path, result: HealthCheckResult
+) -> pd.DataFrame | None:
     if not path.exists():
         result.missing_files.append(path.name)
         return None
@@ -239,9 +247,8 @@ def _safe_load_json(
         result.missing_files.append(path.name)
         return None
     try:
-        raw = ""
-        raw = raw.lstrip("﻿")
         raw = _read_text(path)
+        raw = raw.lstrip("﻿")
         data = json.loads(raw)
         records = _json_records(data)
         if records is None:
@@ -309,9 +316,28 @@ def _to_bool(value: Any, default: bool = False) -> bool:
         return bool(value)
     if isinstance(value, str):
         normalized = value.strip().lower()
-        if normalized in ("true", "1", "yes", "y", "t", "enabled", "enable", "supported"):
+        if normalized in (
+            "true",
+            "1",
+            "yes",
+            "y",
+            "t",
+            "enabled",
+            "enable",
+            "supported",
+        ):
             return True
-        if normalized in ("false", "0", "no", "n", "f", "disabled", "disable", "unsupported", "not supported"):
+        if normalized in (
+            "false",
+            "0",
+            "no",
+            "n",
+            "f",
+            "disabled",
+            "disable",
+            "unsupported",
+            "not supported",
+        ):
             return False
     return default
 
@@ -358,7 +384,9 @@ def analyze_jobs(jobs_df, sessions_df):
                 or "JobName" not in sessions_df.columns
             ):
                 return findings
-            failed = sessions_df[sessions_df["Status"].astype(str).str.strip().str.casefold() == "failed"]
+            failed = sessions_df[
+                sessions_df["Status"].astype(str).str.strip().str.casefold() == "failed"
+            ]
             for job in failed["JobName"].dropna().unique():
                 findings.append(f"Recent job session failure: '{_str_cell(job)}'.")
         except Exception:
@@ -386,7 +414,9 @@ def analyze_security(sec_df):
         if normalized_status == "":
             continue
         if normalized_status.casefold() not in ("passed", "unable to detect"):
-            findings.append(f"Security Best Practice NOT implemented: {bp} ({normalized_status})")
+            findings.append(
+                f"Security Best Practice NOT implemented: {bp} ({normalized_status})"
+            )
     return findings
 
 
@@ -629,7 +659,9 @@ def _push_to_salesforce(
             )
         logger.info("Salesforce push complete")
     except Exception as exc:
-        result.errors.append(f"Salesforce error: {_redact(str(exc), username, password, token)}")
+        result.errors.append(
+            f"Salesforce error: {_redact(str(exc), username, password, token)}"
+        )
 
 
 def _validate_slack_webhook(url: str) -> bool:

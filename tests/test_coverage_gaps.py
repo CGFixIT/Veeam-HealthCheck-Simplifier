@@ -527,8 +527,9 @@ def test_push_salesforce_missing_library_records_error():
 def test_salesforce_error_redacts_credentials():
     result = vhc.HealthCheckResult()
     enriched = [{"severity": "High", "raw": "x", "cmd": "", "kb": ""}]
+    mock_sf_class = mock.MagicMock(side_effect=RuntimeError("bad secretpass token123"))
     with mock.patch.object(vhc, "HAS_SF", True):
-        with mock.patch("vhc_simplifier.Salesforce", side_effect=RuntimeError("bad secretpass token123")):
+        with mock.patch.dict(vhc.__dict__, {"Salesforce": mock_sf_class}):
             vhc._push_to_salesforce(
                 enriched,
                 "001FAKE",
@@ -564,9 +565,13 @@ def test_slack_httpx_failure_records_error():
     result = vhc.HealthCheckResult()
     response = mock.Mock()
     response.raise_for_status.side_effect = RuntimeError("bad webhook")
+    mock_httpx = mock.MagicMock()
+    mock_httpx.post.return_value = response
     with mock.patch.object(vhc, "HAS_HTTPX", True):
-        with mock.patch("vhc_simplifier.httpx.post", return_value=response):
-            vhc._post_slack_summary(enriched, "https://hooks.slack.com/services/T/B/x", result)
+        with mock.patch.dict(vhc.__dict__, {"httpx": mock_httpx}):
+            vhc._post_slack_summary(
+                enriched, "https://hooks.slack.com/services/T/B/x", result
+            )
     assert any("Slack error" in e for e in result.errors)
 
 
