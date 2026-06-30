@@ -163,8 +163,7 @@ class TestWindowsEncoding:
 
     def test_cp1252_csv_decodes_windows_locale_job_name(self, tmp_path):
         csv_data = (
-            "Name,RetentionCount,RetainDaysToKeep,StgEncryptionEnabled\n"
-            '"Sicherung B\u00fcro",3,7,False\n'
+            'Name,RetentionCount,RetainDaysToKeep,StgEncryptionEnabled\n"Sicherung B\u00fcro",3,7,False\n'
         )
         p = tmp_path / "localhost_Jobs.csv"
         p.write_bytes(csv_data.encode("cp1252"))
