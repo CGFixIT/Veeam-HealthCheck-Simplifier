@@ -146,7 +146,10 @@ def _safe_load_csv(path: pathlib.Path, result: HealthCheckResult) -> pd.DataFram
         if path.stat().st_size == 0:
             result.errors.append(f"{path.name}: empty")
             return None
-        return pd.read_csv(path)
+        df = pd.read_csv(path, encoding_errors="replace")
+        if df.empty:
+            return None
+        return df
     except Exception as e:
         result.errors.append(f"{path.name}: {type(e).__name__}: {e}")
         return None
@@ -157,8 +160,9 @@ def _safe_load_json(path: pathlib.Path, result: HealthCheckResult) -> pd.DataFra
         result.missing_files.append(path.name)
         return None
     try:
-        with path.open(encoding="utf-8") as f:
-            data = json.load(f)
+        raw = path.read_text(encoding="utf-8")
+        raw = raw.lstrip("﻿")
+        data = json.loads(raw)
         if isinstance(data, list):
             df = pd.DataFrame(data)
         elif isinstance(data, dict):
@@ -253,9 +257,11 @@ def analyze_jobs(jobs_df, sessions_df):
                 findings.append(f"Job '{name}' missing storage encryption.")
     if sessions_df is not None:
         try:
+            if "Status" not in sessions_df.columns or "JobName" not in sessions_df.columns:
+                return findings
             failed = sessions_df[sessions_df["Status"].astype(str).str.lower() == "failed"]
             for job in failed["JobName"].dropna().unique():
-                findings.append(f"Recent job session failure: '{job}'.")
+                findings.append(f"Recent job session failure: '{_str_cell(job)}'.")
         except Exception:
             pass
     return findings

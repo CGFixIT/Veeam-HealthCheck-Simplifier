@@ -10,9 +10,34 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: "Lint (Python 3.13)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas pytest pytest-cov
+          pip install ruff
+
+      - name: Check syntax and import errors
+        run: ruff check --select=E9,F63,F7,F82 --output-format=full vhc_simplifier.py tests/
+
+      - name: Verify module imports cleanly
+        run: python -c "import vhc_simplifier; print(f'Loaded v{vhc_simplifier.__doc__[:50]}...')"
+
   test:
     name: "Tests (Python ${{ matrix.python-version }}, ${{ matrix.os }})"
     runs-on: ${{ matrix.os }}
+    needs: lint
     strategy:
       fail-fast: false
       matrix:
@@ -34,3 +59,10 @@ jobs:
 
       - name: Run tests with coverage
         run: python -m pytest tests/ -v --tb=short --cov=vhc_simplifier --cov-report=term-missing --cov-fail-under=80
+
+      - name: Run VBR server simulation tests
+        run: python -m pytest tests/test_vbr_server_simulation.py -v --tb=short
+
+      - name: Verify demo mode end-to-end
+        run: python vhc_simplifier.py --demo --quiet --no-artifacts
+        shell: bash
