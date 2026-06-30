@@ -1,0 +1,77 @@
+# ==============================================================================
+# Trivy Vulnerability Scanner — Filesystem + Container Image
+# Free, OSS (Apache-2.0), no license required: https://github.com/aquasecurity/trivy-action
+# Report-only (exit-code: 0): defense-in-depth visibility alongside the
+# dependency-review.yml hard gate, not a duplicate blocking check.
+# Uploads SARIF to GitHub code scanning, same pattern as codeql.yml.
+# ==============================================================================
+
+name: Trivy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 5 * * 6"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  # ── Filesystem / dependency scan (requirements.txt, pyproject.toml) ──
+  trivy-fs:
+    name: "Trivy (filesystem)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-fs-results.sarif"
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"
+
+      - name: Upload Trivy filesystem scan results
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: "trivy-fs-results.sarif"
+          category: "trivy-fs"
+
+  # ── Container image scan ──────────────────────────────────────────────
+  trivy-image:
+    name: "Trivy (container image)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Build Docker image
+        run: docker build -t vhc-simplifier:trivy-scan .
+
+      - name: Run Trivy image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          scan-type: "image"
+          image-ref: "vhc-simplifier:trivy-scan"
+          format: "sarif"
+          output: "trivy-image-results.sarif"
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"
+
+      - name: Upload Trivy image scan results
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: "trivy-image-results.sarif"
+          category: "trivy-image"
