@@ -406,6 +406,11 @@ def _make_redirecting_https_connection(calls, redirect_host, redirect_target):
         def set_debuglevel(self, *args, **kwargs):
             pass
 
+        def set_tunnel(self, *args, **kwargs):
+            # No-op: lets this fake work unchanged whether or not urllib's
+            # ProxyHandler decides to CONNECT-tunnel (e.g. HTTPS_PROXY set in CI).
+            pass
+
         def request(self, method, url, body=None, headers=None, **kwargs):
             calls.append(self.host)
 
@@ -422,8 +427,14 @@ def _make_redirecting_https_connection(calls, redirect_host, redirect_target):
     return _FakeHTTPSConnection
 
 
-def test_post_slack_summary_urllib_does_not_follow_redirect():
+def test_post_slack_summary_urllib_does_not_follow_redirect(monkeypatch):
     """A 3xx from the allowlisted host must not be followed to another host."""
+    # Neutralize any HTTP(S)_PROXY in the test environment (e.g. CI egress proxies) so
+    # urllib's ProxyHandler doesn't CONNECT-tunnel through a proxy host instead of
+    # talking to "hooks.slack.com" directly, which would break this fake's host check.
+    for var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(var, raising=False)
+
     enriched = vhc.enrich_findings(["Job 'X' missing storage encryption."])
     result = vhc.HealthCheckResult()
     calls = []
