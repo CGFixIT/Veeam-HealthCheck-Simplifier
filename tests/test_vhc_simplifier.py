@@ -5,9 +5,12 @@ Run with:  python -m pytest tests/ -v
 
 from __future__ import annotations
 
+import http.client
 import json
 import pathlib
 import sys
+from email.message import Message
+from unittest import mock
 
 import pandas as pd
 import pytest
@@ -360,3 +363,98 @@ def test_run_healthcheck_reads_csv_input(tmp_path):
         write_artifacts=False,
     )
     assert any("retention" in f.lower() or "encryption" in f.lower() for f in out["findings"])
+
+
+# ------------------------------------
+# Slack webhook redirect hardening
+# ------------------------------------
+
+
+class _FakeSock:
+    def close(self):
+        pass
+
+
+class _FakeHTTPResponse:
+    def __init__(self, status, headers):
+        self.status = status
+        self.code = status
+        self.reason = "Found" if 300 <= status < 400 else "OK"
+        self.headers = headers
+        self.msg = self.reason
+
+    def read(self, *args, **kwargs):
+        return b""
+
+    def info(self):
+        return self.headers
+
+    def getheader(self, name, default=None):
+        return self.headers.get(name, default)
+
+    def close(self):
+        pass
+
+
+def _make_redirecting_https_connection(calls, redirect_host, redirect_target):
+    """Build a fake http.client.HTTPSConnection that 302s from redirect_host elsewhere."""
+
+    class _FakeHTTPSConnection(http.client.HTTPSConnection):
+        # Subclass the real connection (rather than faking it from scratch) so urllib
+        # internals that read class-level attributes off http.client.HTTPSConnection
+        # before any instance exists (e.g. .debuglevel, ._http_vsn in HTTPSHandler.__init__)
+        # keep working across Python versions without us having to chase each one down.
+        def __init__(self, host, *args, **kwargs):
+            self.host = host
+            self.sock = _FakeSock()
+
+        def request(self, method, url, body=None, headers=None, **kwargs):
+            calls.append(self.host)
+
+        def getresponse(self):
+            if self.host == redirect_host:
+                headers = Message()
+                headers["Location"] = redirect_target
+                return _FakeHTTPResponse(302, headers)
+            return _FakeHTTPResponse(200, Message())
+
+        def close(self):
+            pass
+
+    return _FakeHTTPSConnection
+
+
+def test_post_slack_summary_urllib_does_not_follow_redirect(monkeypatch):
+    """A 3xx from the allowlisted host must not be followed to another host."""
+    # Neutralize any HTTP(S)_PROXY in the test environment (e.g. CI egress proxies) so
+    # urllib's ProxyHandler doesn't CONNECT-tunnel through a proxy host instead of
+    # talking to "hooks.slack.com" directly, which would break this fake's host check.
+    for var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(var, raising=False)
+
+    enriched = vhc.enrich_findings(["Job 'X' missing storage encryption."])
+    result = vhc.HealthCheckResult()
+    calls = []
+    fake_conn = _make_redirecting_https_connection(calls, "hooks.slack.com", "https://evil.example.com/steal")
+
+    with mock.patch.object(vhc, "HAS_HTTPX", False):
+        with mock.patch("http.client.HTTPSConnection", fake_conn):
+            vhc._post_slack_summary(enriched, "https://hooks.slack.com/services/T/B/x", result)
+
+    assert calls == ["hooks.slack.com"], f"redirect target must never be contacted, got calls={calls}"
+    assert any("Slack error" in e for e in result.errors)
+
+
+def test_post_slack_summary_httpx_passes_follow_redirects_false():
+    """The httpx branch must explicitly disable redirect-following (defense in depth)."""
+    enriched = vhc.enrich_findings(["Job 'X' missing storage encryption."])
+    result = vhc.HealthCheckResult()
+    mock_httpx = mock.MagicMock()
+    with mock.patch.object(vhc, "HAS_HTTPX", True):
+        with mock.patch.dict(vhc.__dict__, {"httpx": mock_httpx}):
+            vhc._post_slack_summary(enriched, "https://hooks.slack.com/services/T/B/x", result)
+
+    mock_httpx.post.assert_called_once()
+    _, kwargs = mock_httpx.post.call_args
+    assert kwargs.get("follow_redirects") is False
+    assert not result.errors
