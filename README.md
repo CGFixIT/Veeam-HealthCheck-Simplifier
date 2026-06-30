@@ -20,8 +20,8 @@ This project takes those raw exports and transforms them into actionable remedia
 
 | VBR Version | Build | Windows Server | Status |
 |---|---|---|---|
-| v12.3.2 | 12.3.2.4643 | 2016, 2019, 2022, 2025 | Fully tested |
-| v13 (latest) | 13.0.x | 2019, 2022, 2025 | Fully tested |
+| v12.3.2 | 12.3.2.4643 | 2016, 2019, 2022, 2025 | Simulated VHC fixture coverage |
+| v13 | 13.0.x fixture target | 2019, 2022, 2025 | Simulated VHC fixture coverage |
 
 ---
 

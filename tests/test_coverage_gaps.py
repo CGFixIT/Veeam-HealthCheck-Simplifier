@@ -524,6 +524,25 @@ def test_push_salesforce_missing_library_records_error():
     assert any("simple-salesforce" in e for e in result.errors)
 
 
+def test_salesforce_error_redacts_credentials():
+    result = vhc.HealthCheckResult()
+    enriched = [{"severity": "High", "raw": "x", "cmd": "", "kb": ""}]
+    mock_sf_class = mock.MagicMock(side_effect=RuntimeError("bad secretpass token123"))
+    with mock.patch.object(vhc, "HAS_SF", True):
+        with mock.patch.dict(vhc.__dict__, {"Salesforce": mock_sf_class}):
+            vhc._push_to_salesforce(
+                enriched,
+                "001FAKE",
+                result,
+                username="user@example.com",
+                password="secretpass",
+                token="token123",
+            )
+    assert result.errors
+    assert "secretpass" not in result.errors[0]
+    assert "token123" not in result.errors[0]
+
+
 # =====================================================================
 # _post_slack_summary via urllib fallback (mocked)
 # =====================================================================
@@ -539,6 +558,21 @@ def test_slack_urllib_fallback(tmp_path):
             vhc._post_slack_summary(enriched, "https://hooks.slack.com/T/B/x", result)
     assert not result.errors
     mock_urlopen.assert_called_once()
+
+
+def test_slack_httpx_failure_records_error():
+    enriched = vhc.enrich_findings(["Job 'X' missing storage encryption."])
+    result = vhc.HealthCheckResult()
+    response = mock.Mock()
+    response.raise_for_status.side_effect = RuntimeError("bad webhook")
+    mock_httpx = mock.MagicMock()
+    mock_httpx.post.return_value = response
+    with mock.patch.object(vhc, "HAS_HTTPX", True):
+        with mock.patch.dict(vhc.__dict__, {"httpx": mock_httpx}):
+            vhc._post_slack_summary(
+                enriched, "https://hooks.slack.com/services/T/B/x", result
+            )
+    assert any("Slack error" in e for e in result.errors)
 
 
 # =====================================================================

@@ -44,6 +44,11 @@ def test_to_number_respects_default():
     assert vhc._to_number("garbage", default=99) == 99
 
 
+def test_to_number_parses_export_strings():
+    assert vhc._to_number("30 days") == 30
+    assert vhc._to_number("1,024") == 1024
+
+
 @pytest.mark.parametrize(
     "value, expected",
     [
@@ -58,6 +63,10 @@ def test_to_number_respects_default():
         (None, False),
         (float("nan"), False),
         ("", False),
+        ("Enabled", True),
+        ("Supported", True),
+        ("Disabled", False),
+        ("Not Supported", False),
     ],
 )
 def test_to_bool_coercion(value, expected):
@@ -146,6 +155,12 @@ def test_analyze_jobs_detects_failed_sessions():
     assert any("JobX" in f for f in findings)
 
 
+def test_analyze_jobs_trims_session_status():
+    sessions = pd.DataFrame([{"JobName": "JobX", "Status": " Failed "}])
+    findings = vhc.analyze_jobs(None, sessions)
+    assert any("JobX" in f for f in findings)
+
+
 def test_analyze_security_skips_passed_and_blank():
     sec = pd.DataFrame(
         [
@@ -158,6 +173,11 @@ def test_analyze_security_skips_passed_and_blank():
     findings = vhc.analyze_security(sec)
     assert len(findings) == 1
     assert "MFA is enabled" in findings[0]
+
+
+def test_analyze_security_status_is_case_insensitive():
+    sec = pd.DataFrame([{"Best Practice": "MFA is enabled", "Status": " passed "}])
+    assert vhc.analyze_security(sec) == []
 
 
 def test_analyze_repositories_flags_non_immutable():
