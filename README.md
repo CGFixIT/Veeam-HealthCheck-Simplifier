@@ -237,6 +237,7 @@ Six GitHub Actions workflows run on every push and pull request to `main`:
 | **DevSkim** | `devskim.yml` | Microsoft security anti-pattern detection (push, PR, weekly) |
 | **CodeQL** | `codeql.yml` | GitHub static analysis (push, PR, weekly) |
 | **Dependency Review** | `dependency-review.yml` | Supply chain vulnerability checks on PRs |
+| **Trivy** | `trivy.yml` | Container/dependency vulnerability scanning (filesystem + Docker image), SARIF → GitHub code scanning (push, PR, weekly) |
 
 ---
 
