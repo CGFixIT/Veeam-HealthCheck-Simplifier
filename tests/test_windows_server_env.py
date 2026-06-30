@@ -79,6 +79,24 @@ class TestWindowsPaths:
         assert out["findings"]
         assert (deep / "remediation_summary.md").exists()
 
+    def test_hostname_prefixed_vhc_files(self, tmp_path):
+        export_dir = tmp_path / "VHC"
+        export_dir.mkdir()
+        (export_dir / "VBR01_Jobs.csv").write_text(vhc.EMBEDDED_JOBS, encoding="utf-8")
+        (export_dir / "VeeamSessionReport.csv").write_text(vhc.EMBEDDED_SESSIONS, encoding="utf-8")
+        (export_dir / "VBR01_SecurityCompliance.csv").write_text(vhc.EMBEDDED_SECURITY, encoding="utf-8")
+        (export_dir / "VBR01_Repositories.csv").write_text(vhc.EMBEDDED_REPOS, encoding="utf-8")
+        (export_dir / "VBR01malware_events.csv").write_text(vhc.EMBEDDED_MALWARE, encoding="utf-8")
+        out = vhc.run_healthcheck(
+            input_dir=str(export_dir),
+            output_dir=str(tmp_path / "out"),
+            demo=False,
+            verbose=False,
+            write_artifacts=False,
+        )
+        assert out["findings"]
+        assert not out["missing_files"]
+
 
 # =====================================================================
 # Windows Server encoding edge cases
@@ -105,7 +123,9 @@ class TestWindowsEncoding:
         result = vhc.HealthCheckResult()
         df = vhc._safe_load_csv(p, result)
         # Either parses successfully or records an error — must not crash.
-        assert df is not None or result.errors
+        assert df is not None
+        assert not result.errors
+        assert "Name" in df.columns
 
     def test_latin1_special_chars_in_job_name(self, tmp_path):
         """Job names with non-ASCII (e.g., German umlauts) from Windows Server locales."""
@@ -131,6 +151,16 @@ class TestWindowsEncoding:
         df = vhc._safe_load_json(p, result)
         # BOM may cause json.load to fail — must not crash.
         assert df is not None or result.errors
+
+    def test_utf16_json(self, tmp_path):
+        data = [{"Name": "TestRepo", "IsImmutabilitySupported": False}]
+        p = tmp_path / "localhost_Repositories.json"
+        p.write_bytes(json.dumps(data).encode("utf-16-le"))
+        result = vhc.HealthCheckResult()
+        df = vhc._safe_load_json(p, result)
+        assert df is not None
+        assert not result.errors
+        assert df.iloc[0]["Name"] == "TestRepo"
 
 
 # =====================================================================
@@ -305,6 +335,7 @@ class TestIntegrationErrorHandling:
         assert vhc._validate_slack_webhook(
             "https://hooks.slack-gov.com/services/T00/B00/xxx"
         )
+        assert not vhc._validate_slack_webhook("https://hooks.slack.com/T00/B00/xxx")
         assert not vhc._validate_slack_webhook(  # DevSkim: ignore DS137138 — testing that HTTP is rejected
             "http://hooks.slack.com/services/T00/B00/xxx"
         )

@@ -95,7 +95,9 @@ EXPECTED_BASENAMES: dict[str, str] = {
     "malware": "localhostmalware_events",
 }
 
+_TEXT_ENCODINGS = ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "cp1252")
 _PS_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 def _ps_quote(s: str) -> str | None:
@@ -142,23 +144,92 @@ class HealthCheckResult:
         }
 
 
-def _safe_load_csv(
-    path: pathlib.Path, result: HealthCheckResult
-) -> pd.DataFrame | None:
+def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.rename(columns=lambda c: str(c).lstrip("\ufeff").strip())
+    if any("\x00" in str(c) for c in df.columns):
+        raise UnicodeError("decoded columns contain NUL bytes")
+    return df
+
+
+def _candidate_encodings(path: pathlib.Path) -> tuple[str, ...]:
+    sample = path.read_bytes()[:4096]
+    if b"\x00" in sample:
+        return ("utf-16", "utf-16-le", "utf-16-be", "utf-8-sig", "cp1252")
+    return _TEXT_ENCODINGS
+
+
+def _read_text(path: pathlib.Path) -> str:
+    last_exc: Exception | None = None
+    for encoding in _candidate_encodings(path):
+        try:
+            text = path.read_text(encoding=encoding)
+            if "\x00" in text:
+                raise UnicodeError("decoded text contains NUL bytes")
+            return text.lstrip("\ufeff")
+        except UnicodeError as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    return path.read_text(encoding="utf-8-sig").lstrip("\ufeff")
+
+
+def _json_records(data: Any) -> Any:
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return None
+    for key in ("data", "value", "items", "results"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return value
+    result = data.get("result")
+    nested = _json_records(result) if isinstance(result, dict) else None
+    return nested if nested is not None else [data]
+
+
+def _resolve_input_file(input_dir: pathlib.Path, key: str, base: str, input_format: str) -> pathlib.Path:
+    exact = input_dir / f"{base}.{input_format}"
+    if exact.exists() or not input_dir.is_dir():
+        return exact
+
+    suffix = f".{input_format}".lower()
+    candidates: list[pathlib.Path] = []
+    for path in input_dir.iterdir():
+        if not path.is_file() or path.suffix.lower() != suffix:
+            continue
+        stem = path.stem.lower()
+        if key == "jobs" and (stem == "jobs" or stem.endswith("_jobs")):
+            candidates.append(path)
+        elif key == "sessions" and stem.endswith("sessionreport"):
+            candidates.append(path)
+        elif key == "security" and (stem == "securitycompliance" or stem.endswith("_securitycompliance")):
+            candidates.append(path)
+        elif key == "repositories" and (stem == "repositories" or stem.endswith("_repositories")):
+            candidates.append(path)
+        elif key == "malware" and stem.endswith("malware_events"):
+            candidates.append(path)
+    return sorted(candidates, key=lambda p: p.name.lower())[0] if candidates else exact
+
+
+def _safe_load_csv(path: pathlib.Path, result: HealthCheckResult) -> pd.DataFrame | None:
     if not path.exists():
         result.missing_files.append(path.name)
         return None
-    try:
-        if path.stat().st_size == 0:
-            result.errors.append(f"{path.name}: empty")
-            return None
-        df = pd.read_csv(path, encoding_errors="replace")
-        if df.empty:
-            return None
-        return df
-    except Exception as e:
-        result.errors.append(f"{path.name}: {type(e).__name__}: {e}")
+    if path.stat().st_size == 0:
+        result.errors.append(f"{path.name}: empty")
         return None
+
+    last_exc: Exception | None = None
+    for encoding in _candidate_encodings(path):
+        try:
+            df = pd.read_csv(path, encoding=encoding, encoding_errors="strict")
+            df = _clean_columns(df)
+            return None if df.empty else df
+        except Exception as exc:
+            last_exc = exc
+    if last_exc is not None:
+        result.errors.append(f"{path.name}: {type(last_exc).__name__}: {last_exc}")
+    return None
 
 
 def _safe_load_json(
@@ -168,16 +239,15 @@ def _safe_load_json(
         result.missing_files.append(path.name)
         return None
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
+        raw = ""
         raw = raw.lstrip("﻿")
+        raw = _read_text(path)
         data = json.loads(raw)
-        if isinstance(data, list):
-            df = pd.DataFrame(data)
-        elif isinstance(data, dict):
-            df = pd.DataFrame(data.get("data", [data]))
-        else:
+        records = _json_records(data)
+        if records is None:
             result.errors.append(f"{path.name}: bad JSON structure")
             return None
+        df = _clean_columns(pd.DataFrame(records))
         return df if not df.empty else None
     except Exception as e:
         result.errors.append(f"{path.name}: {type(e).__name__}: {e}")
@@ -207,6 +277,14 @@ def _to_number(value: Any, default: float = 0.0) -> float:
             return default
     except (TypeError, ValueError):
         pass
+    if isinstance(value, str):
+        cleaned = value.strip().replace(",", "")
+        match = _NUMBER_RE.search(cleaned)
+        if match:
+            try:
+                return float(match.group(0))
+            except ValueError:
+                return default
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -230,7 +308,11 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     if isinstance(value, str):
-        return value.strip().lower() in ("true", "1", "yes", "y", "t")
+        normalized = value.strip().lower()
+        if normalized in ("true", "1", "yes", "y", "t", "enabled", "enable", "supported"):
+            return True
+        if normalized in ("false", "0", "no", "n", "f", "disabled", "disable", "unsupported", "not supported"):
+            return False
     return default
 
 
@@ -276,9 +358,7 @@ def analyze_jobs(jobs_df, sessions_df):
                 or "JobName" not in sessions_df.columns
             ):
                 return findings
-            failed = sessions_df[
-                sessions_df["Status"].astype(str).str.lower() == "failed"
-            ]
+            failed = sessions_df[sessions_df["Status"].astype(str).str.strip().str.casefold() == "failed"]
             for job in failed["JobName"].dropna().unique():
                 findings.append(f"Recent job session failure: '{_str_cell(job)}'.")
         except Exception:
@@ -302,10 +382,11 @@ def analyze_security(sec_df):
                 continue
         except (TypeError, ValueError):
             pass
-        if str(status).strip() == "":
+        normalized_status = str(status).strip()
+        if normalized_status == "":
             continue
-        if status not in ("Passed", "Unable to detect"):
-            findings.append(f"Security Best Practice NOT implemented: {bp} ({status})")
+        if normalized_status.casefold() not in ("passed", "unable to detect"):
+            findings.append(f"Security Best Practice NOT implemented: {bp} ({normalized_status})")
     return findings
 
 
@@ -548,16 +629,23 @@ def _push_to_salesforce(
             )
         logger.info("Salesforce push complete")
     except Exception as exc:
-        result.errors.append(f"Salesforce error: {exc}")
+        result.errors.append(f"Salesforce error: {_redact(str(exc), username, password, token)}")
 
 
 def _validate_slack_webhook(url: str) -> bool:
     """Reject obviously invalid Slack webhook URLs before attempting network calls."""
     if not isinstance(url, str):
         return False
-    return url.startswith("https://hooks.slack.com/") or url.startswith(
-        "https://hooks.slack-gov.com/"
+    return url.startswith("https://hooks.slack.com/services/") or url.startswith(
+        "https://hooks.slack-gov.com/services/"
     )
+
+
+def _redact(text: str, *secrets: str | None) -> str:
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "<redacted>")
+    return text
 
 
 def _post_slack_summary(enriched, webhook, result):
@@ -567,12 +655,16 @@ def _post_slack_summary(enriched, webhook, result):
     payload = json.dumps({"text": message}).encode()
     try:
         if HAS_HTTPX:
-            httpx.post(webhook, json={"text": message}, timeout=10)
+            response = httpx.post(webhook, json={"text": message}, timeout=10)
+            response.raise_for_status()
         else:
             req = urllib.request.Request(
                 webhook, data=payload, headers={"Content-Type": "application/json"}
             )
-            urllib.request.urlopen(req, timeout=10)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                status = getattr(response, "status", 200)
+                if isinstance(status, int) and status >= 400:
+                    raise RuntimeError(f"Slack returned HTTP {status}")
         logger.info("Slack posted")
     except Exception as exc:
         result.errors.append(f"Slack error: {exc}")
@@ -667,7 +759,8 @@ def run_healthcheck(
         loader = _safe_load_json if input_format == "json" else _safe_load_csv
         dfs = {}
         for key, base in EXPECTED_BASENAMES.items():
-            dfs[key] = loader(input_dir / f"{base}.{input_format}", result)
+            path = _resolve_input_file(input_dir, key, base, input_format)
+            dfs[key] = loader(path, result)
 
     missing = [k for k, v in dfs.items() if v is None]
     if missing and not demo:
