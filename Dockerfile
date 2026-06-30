@@ -1,12 +1,11 @@
-FROM python:3.13-slim AS base
+FROM python:3.13-slim
 
 LABEL maintainer="CGFixIT"
 LABEL description="Veeam Health Check Simplifier — processes VBR exports into remediation artifacts"
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir "pandas>=2.0.0"
 
 COPY vhc_simplifier.py .
 
