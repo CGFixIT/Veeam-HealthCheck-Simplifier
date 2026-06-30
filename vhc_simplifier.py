@@ -240,7 +240,7 @@ def _row_name(row: Any, default: str = "<unknown>") -> str:
     return _str_cell(row.get("Name"), default)
 
 
-def analyze_jobs(jobs_df, sessions_df, result):
+def analyze_jobs(jobs_df, sessions_df):
     findings: list[str] = []
     if jobs_df is not None:
         for _, row in jobs_df.iterrows():
@@ -261,7 +261,7 @@ def analyze_jobs(jobs_df, sessions_df, result):
     return findings
 
 
-def analyze_security(sec_df, result):
+def analyze_security(sec_df):
     findings: list[str] = []
     if sec_df is None:
         return findings
@@ -282,7 +282,7 @@ def analyze_security(sec_df, result):
     return findings
 
 
-def analyze_repositories(repo_df, result):
+def analyze_repositories(repo_df):
     findings: list[str] = []
     if repo_df is None:
         return findings
@@ -293,7 +293,7 @@ def analyze_repositories(repo_df, result):
     return findings
 
 
-def analyze_malware(malware_df, result):
+def analyze_malware(malware_df):
     findings: list[str] = []
     if malware_df is None:
         return findings
@@ -610,16 +610,16 @@ def run_healthcheck(
 
     sections = {
         "Backup Jobs": _run_analyzer(
-            "Backup Jobs", analyze_jobs, result, dfs.get("jobs"), dfs.get("sessions"), result
+            "Backup Jobs", analyze_jobs, result, dfs.get("jobs"), dfs.get("sessions")
         ),
         "Security & Compliance": _run_analyzer(
-            "Security & Compliance", analyze_security, result, dfs.get("security"), result
+            "Security & Compliance", analyze_security, result, dfs.get("security")
         ),
         "Repositories": _run_analyzer(
-            "Repositories", analyze_repositories, result, dfs.get("repositories"), result
+            "Repositories", analyze_repositories, result, dfs.get("repositories")
         ),
         "Malware Events": _run_analyzer(
-            "Malware Events", analyze_malware, result, dfs.get("malware"), result
+            "Malware Events", analyze_malware, result, dfs.get("malware")
         ),
     }
     all_findings = [f for fl in sections.values() for f in fl]
